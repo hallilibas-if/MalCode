@@ -76,6 +76,8 @@ Set the local connection string:
 export DATABASE_URL="postgres://mal_ledger_user:YOUR_PASSWORD@localhost:5432/mal_ledger?sslmode=disable"
 ```
 
+Replace `YOUR_PASSWORD` with the real password you entered when creating `mal_ledger_user`. Do not keep the literal placeholder in the connection string.
+
 Apply the schema:
 
 ```bash
@@ -94,6 +96,14 @@ If local password authentication fails, check `/etc/postgresql/*/main/pg_hba.con
 
 ```bash
 sudo systemctl restart postgresql
+```
+
+To reset the local project user's password:
+
+```bash
+sudo -u postgres psql -c "ALTER USER mal_ledger_user WITH PASSWORD 'choose_a_real_password';"
+export DATABASE_URL="postgres://mal_ledger_user:choose_a_real_password@localhost:5432/mal_ledger?sslmode=disable"
+psql "$DATABASE_URL" -f schema.sql
 ```
 
 ## Run With Docker
