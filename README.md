@@ -6,17 +6,56 @@ The folders `blnk-main/` and `double-entry-bank-Go-main/` are local reference pr
 
 ## Current Status
 
-Milestone 1 is complete:
+Milestones 1 and 2 are complete:
 
 - `schema.sql`: PostgreSQL schema for accounts, immutable ledger entries, and idempotency keys.
+- `types.go`: Go domain models, API payload contracts, and the `LedgerService` interface.
 
-The Go application will be added in later milestones. For now, the runnable artifact is the schema.
+The database implementation and HTTP server will be added in later milestones.
 
 ## Requirements
 
+- Go toolchain. This provides both `go` and `gofmt`.
 - PostgreSQL 12 or later for the current schema. PostgreSQL 14+ is recommended for a production deployment.
 - `psql`
 - Optional: Docker, if you do not already have PostgreSQL running locally
+
+## Install Go On Ubuntu
+
+Install Go before running Go formatting, tests, or future application code.
+
+The quickest Ubuntu setup is:
+
+```bash
+sudo apt update
+sudo apt install -y golang-go
+go version
+gofmt -h
+```
+
+If the Ubuntu package is unavailable or too old, use the official Go Linux
+tarball instead. The official install guide is at <https://go.dev/doc/install>,
+and the current stable version can be checked at <https://go.dev/VERSION?m=text>.
+
+For Linux x86-64:
+
+```bash
+cd /tmp
+GO_VERSION="$(curl -fsSL https://go.dev/VERSION?m=text | awk 'NR == 1 { print $1 }')"
+curl -fLO "https://go.dev/dl/${GO_VERSION}.linux-amd64.tar.gz"
+
+sudo rm -rf /usr/local/go
+sudo tar -C /usr/local -xzf "${GO_VERSION}.linux-amd64.tar.gz"
+
+echo 'export PATH=$PATH:/usr/local/go/bin' >> "$HOME/.profile"
+export PATH=$PATH:/usr/local/go/bin
+
+go version
+gofmt -w types.go
+```
+
+Open a new terminal, or run `source "$HOME/.profile"`, if `go` is not found
+after installation.
 
 ## Install PostgreSQL On Ubuntu
 
