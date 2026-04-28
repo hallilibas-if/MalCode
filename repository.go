@@ -15,6 +15,7 @@ import (
 const (
 	defaultSerializableAttempts  = 5
 	postgresSerializationFailure = "40001"
+	postgresUniqueViolation      = "23505"
 )
 
 var (
@@ -104,8 +105,9 @@ func (s *PostgresLedgerService) CreateAccount(ctx context.Context, req CreateAcc
 //
 // Each successful call writes exactly two immutable entries sharing one
 // transaction_id: a DEBIT on the source account and a CREDIT on the destination
-// account. The idempotency key is recorded in the same database transaction so a
-// successful retry cannot post a duplicate transfer.
+// account. The idempotency key is reserved before ledger movement and finalized
+// with the committed transaction payload so a successful retry cannot post a
+// duplicate transfer.
 func (s *PostgresLedgerService) PostTransaction(ctx context.Context, req PostTransactionRequest) error {
 	if err := s.validateDB(); err != nil {
 		return err
@@ -119,15 +121,23 @@ func (s *PostgresLedgerService) PostTransaction(ctx context.Context, req PostTra
 		return err
 	}
 
-	return s.execSerializableWithRetry(ctx, func(tx *sql.Tx) error {
-		shouldPost, err := ensureIdempotencyKey(ctx, tx, req.IdempotencyKey, requestHash)
-		if err != nil {
-			return err
-		}
-		if !shouldPost {
-			return nil
-		}
+	// Absolute Truth Path: before opening the financial transaction, reserve the
+	// client-supplied idempotency key with one ACID PostgreSQL INSERT. The primary
+	// key on idempotency_keys.key becomes the global arbiter for retries: exactly
+	// one request can create the PENDING row, and all duplicates are forced down
+	// the unique-violation path instead of reaching balance checks or ledger
+	// writes. In this schema, PENDING is represented by completed_at IS NULL;
+	// COMPLETED is represented by completed_at IS NOT NULL plus cached response
+	// payload.
+	shouldPost, err := s.reserveIdempotencyKey(ctx, req.IdempotencyKey, requestHash)
+	if err != nil {
+		return err
+	}
+	if !shouldPost {
+		return nil
+	}
 
+	return s.execSerializableWithRetry(ctx, func(tx *sql.Tx) error {
 		sourceAccount, destinationAccount, err := lockTransferAccounts(ctx, tx, req.SourceAccountID, req.DestinationAccountID)
 		if err != nil {
 			return err
@@ -160,8 +170,11 @@ func (s *PostgresLedgerService) PostTransaction(ctx context.Context, req PostTra
 // FetchBalance calculates an account balance from immutable ledger entries.
 //
 // The accounts table deliberately has no cached balance column in this minimal
-// schema. Reading the balance from entries keeps the source of truth auditable:
-// credits increase the balance, debits decrease it.
+// schema. For a financial ledger, the immutable entry stream is the system of
+// record; a mutable balance column would be a derived cache that can drift from
+// the audit trail after failed writes, partial retries, or operational mistakes.
+// Reading the balance from entries keeps the source of truth auditable: credits
+// increase the balance, debits decrease it.
 func (s *PostgresLedgerService) FetchBalance(ctx context.Context, accountID string) (*BalanceResponse, error) {
 	if err := s.validateDB(); err != nil {
 		return nil, err
@@ -270,36 +283,39 @@ func (s *PostgresLedgerService) execSerializableOnce(ctx context.Context, fn fun
 	return nil
 }
 
-func ensureIdempotencyKey(ctx context.Context, tx *sql.Tx, key string, requestHash string) (bool, error) {
+func (s *PostgresLedgerService) reserveIdempotencyKey(ctx context.Context, key string, requestHash string) (bool, error) {
+	// This INSERT intentionally does not use ON CONFLICT DO NOTHING. A PostgreSQL
+	// unique-violation error is the signal that another request already owns this
+	// idempotency key. By letting the database enforce the single-writer rule, we
+	// avoid process-local locks and make retries safe across multiple API servers.
 	const insertQuery = `
 		INSERT INTO idempotency_keys (key, request_hash)
 		VALUES ($1, $2)
-		ON CONFLICT (key) DO NOTHING
 	`
 
-	result, err := tx.ExecContext(ctx, insertQuery, key, requestHash)
-	if err != nil {
+	if _, err := s.db.ExecContext(ctx, insertQuery, key, requestHash); err != nil {
+		if hasPostgresCode(err, postgresUniqueViolation) {
+			return s.handleDuplicateIdempotencyKey(ctx, key, requestHash)
+		}
 		return false, fmt.Errorf("insert idempotency key: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("check idempotency insert: %w", err)
-	}
-	if rowsAffected == 1 {
-		return true, nil
-	}
+	return true, nil
+}
 
+func (s *PostgresLedgerService) handleDuplicateIdempotencyKey(ctx context.Context, key string, requestHash string) (bool, error) {
 	const selectQuery = `
-		SELECT request_hash, completed_at
+		SELECT request_hash, response_status_code, response_payload, completed_at
 		FROM idempotency_keys
 		WHERE key = $1
-		FOR UPDATE
 	`
 
 	var existingHash string
+	var responseStatusCode sql.NullInt64
+	var responsePayload []byte
 	var completedAt sql.NullTime
-	err = tx.QueryRowContext(ctx, selectQuery, key).Scan(&existingHash, &completedAt)
+	err := s.db.QueryRowContext(ctx, selectQuery, key).
+		Scan(&existingHash, &responseStatusCode, &responsePayload, &completedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, ErrMissingIdempotencyKey
 	}
@@ -311,6 +327,12 @@ func ensureIdempotencyKey(ctx context.Context, tx *sql.Tx, key string, requestHa
 	}
 	if !completedAt.Valid {
 		return false, ErrIdempotencyInProgress
+	}
+	if !responseStatusCode.Valid || len(responsePayload) == 0 {
+		return false, fmt.Errorf("completed idempotency key %q is missing cached response", key)
+	}
+	if responseStatusCode.Int64 < 200 || responseStatusCode.Int64 > 299 {
+		return false, fmt.Errorf("cached idempotency response for key %q was not successful: status %d", key, responseStatusCode.Int64)
 	}
 
 	return false, nil

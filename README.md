@@ -1,17 +1,19 @@
 # Minimal Double-Entry Ledger
 
-This repository contains a clean, from-scratch implementation for Mal's Head of Engineering take-home assessment. The current milestone is the PostgreSQL data model and schema for a minimal double-entry ledger.
+This repository contains a clean, from-scratch implementation for Mal's Head of Engineering take-home assessment. The current milestone is a minimal PostgreSQL-backed double-entry ledger core with strict schema constraints, clean Go contracts, atomic posting logic, and database-backed idempotency.
 
 The folders `blnk-main/` and `double-entry-bank-Go-main/` are local reference projects only. They are not part of this implementation and should not be copied from.
 
 ## Current Status
 
-Milestones 1 and 2 are complete:
+Milestones 1 through 5 are complete:
 
 - `schema.sql`: PostgreSQL schema for accounts, immutable ledger entries, and idempotency keys.
 - `types.go`: Go domain models, API payload contracts, and the `LedgerService` interface.
+- `repository.go`: PostgreSQL-backed `LedgerService` implementation with serializable transactions, account row locks, dynamic balance reads, and idempotency-key protection.
+- `cmd/demo/main.go`: concise evaluator demo showing service wiring, a settlement-account deposit, a user-to-user transfer, and a duplicate idempotency-key retry.
 
-The database implementation and HTTP server will be added in later milestones.
+The HTTP server, Go module scaffolding, database driver wiring, and integration tests will be added in later milestones.
 
 ## Requirements
 
@@ -51,11 +53,27 @@ echo 'export PATH=$PATH:/usr/local/go/bin' >> "$HOME/.profile"
 export PATH=$PATH:/usr/local/go/bin
 
 go version
-gofmt -w types.go
+gofmt -w types.go repository.go
 ```
 
 Open a new terminal, or run `source "$HOME/.profile"`, if `go` is not found
 after installation.
+
+## Verify The Go Code
+
+This folder does not have a `go.mod` yet, so use a no-module compile check for
+the current packages:
+
+```bash
+gofmt -w types.go repository.go cmd/demo/main.go
+GOCACHE=/tmp/go-build GO111MODULE=off go test ./...
+```
+
+After module scaffolding is added in a later milestone, the normal command will be:
+
+```bash
+go test ./...
+```
 
 ## Install PostgreSQL On Ubuntu
 
@@ -309,9 +327,16 @@ Key fields:
 - `response_payload`: cached JSON response after completion.
 - `completed_at`: marks the request as replayable.
 
-## Future Go Implementation Contract
+There is no separate status column in this minimal schema:
 
-Use these names and responsibilities in later milestones so the code remains easy to review.
+- Pending requests are represented by `completed_at IS NULL`.
+- Completed requests are represented by `completed_at IS NOT NULL` plus cached response fields.
+
+## Current Go Implementation
+
+The current Go code is a small `ledger` package with no third-party imports.
+The application entrypoint will later provide a PostgreSQL `database/sql` driver
+and a `*sql.DB`.
 
 ### Domain Types
 
@@ -325,45 +350,35 @@ Use these names and responsibilities in later milestones so the code remains eas
 - Represents one immutable ledger row.
 - Must always be single-sided: either debit or credit.
 
-`Transaction`
-
-- Represents one logical movement between accounts.
-- In the minimal implementation, one transaction creates exactly two entries.
-
-`IdempotencyRecord`
+`IdempotencyKey`
 
 - Represents one row in `idempotency_keys`.
 - Used to cache and replay completed responses.
 
-### Repository Functions
+### Service Contract
 
-`CreateAccount(ctx, ownerID, currency)`
+`CreateAccount(ctx context.Context, req CreateAccountRequest) (*Account, error)`
 
 - Inserts one account.
-- Validates currency before sending data to PostgreSQL.
+- Relies on PostgreSQL constraints for strict currency validation.
 
-`PostTransaction(ctx, fromAccountID, toAccountID, amount, idempotencyKey)`
+`PostTransaction(ctx context.Context, req PostTransactionRequest) error`
 
-- Starts one database transaction.
-- Reserves the idempotency key.
-- Locks or validates both accounts.
+- Reserves the idempotency key before ledger movement.
+- Uses `sql.LevelSerializable` for the financial transaction.
+- Locks account rows with `SELECT ... FOR UPDATE` before checking funds.
 - Inserts one debit and one credit entry with the same `transaction_id`.
-- Stores the cached idempotency response.
-- Commits once all writes succeed.
+- Catches SQLSTATE `40001` serialization failures and retries.
+- Finalizes the idempotency row with a cached transaction payload after success.
 
-`FetchBalance(ctx, accountID)`
+`FetchBalance(ctx context.Context, accountID string) (*BalanceResponse, error)`
 
 - Calculates balance dynamically from `entries`.
 - Does not trust a mutable cached balance column.
 
-`GetEntriesByTransaction(ctx, transactionID)`
+## Documentation Standard
 
-- Returns the two entry rows linked by `transaction_id`.
-- Useful for debugging, audit, and future reconciliation.
-
-## Documentation Standard For The Go App
-
-When the Go service is added:
+As the service grows:
 
 - Every exported type and function should have GoDoc comments.
 - Comments should explain financial invariants, not obvious syntax.
@@ -377,7 +392,7 @@ Example style:
 // It inserts exactly one DEBIT entry and one CREDIT entry with the same
 // transaction ID. If any write fails, the database transaction rolls back so
 // the ledger cannot contain a half-posted movement.
-func (s *LedgerService) PostTransaction(ctx context.Context, req PostTransactionRequest) (*TransactionResponse, error) {
-    // Implementation added in Milestone 3.
+func (s *PostgresLedgerService) PostTransaction(ctx context.Context, req PostTransactionRequest) error {
+    // Implementation lives in repository.go.
 }
 ```
