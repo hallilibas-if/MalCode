@@ -14,7 +14,7 @@ The Go application will be added in later milestones. For now, the runnable arti
 
 ## Requirements
 
-- PostgreSQL 14 or later
+- PostgreSQL 12 or later for the current schema. PostgreSQL 14+ is recommended for a production deployment.
 - `psql`
 - Optional: Docker, if you do not already have PostgreSQL running locally
 
@@ -70,10 +70,16 @@ Create the database owned by that user:
 sudo -u postgres createdb --owner=mal_ledger_user mal_ledger
 ```
 
+Enable `pgcrypto` once as the PostgreSQL admin user. The schema uses `gen_random_uuid()`, which is provided by this extension, and normal app users should not need superuser privileges:
+
+```bash
+sudo -u postgres psql -p 5432 -d mal_ledger -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+```
+
 Set the local connection string:
 
 ```bash
-export DATABASE_URL="postgres://mal_ledger_user:YOUR_PASSWORD@localhost:5432/mal_ledger?sslmode=disable"
+export DATABASE_URL="postgres://mal_ledger_user:YOUR_PASSWORD@127.0.0.1:5432/mal_ledger?sslmode=disable"
 ```
 
 Replace `YOUR_PASSWORD` with the real password you entered when creating `mal_ledger_user`. Do not keep the literal placeholder in the connection string.
@@ -84,7 +90,7 @@ Apply the schema:
 psql "$DATABASE_URL" -f schema.sql
 ```
 
-If `CREATE EXTENSION pgcrypto` fails because your local PostgreSQL policy restricts extensions, apply the schema once as the `postgres` admin user or ask a database admin to enable `pgcrypto` in the `mal_ledger` database.
+If `CREATE EXTENSION pgcrypto` prints `already exists, skipping`, that is expected after the admin command above.
 
 Verify the tables:
 
@@ -101,9 +107,16 @@ sudo systemctl restart postgresql
 To reset the local project user's password:
 
 ```bash
-sudo -u postgres psql -c "ALTER USER mal_ledger_user WITH PASSWORD 'choose_a_real_password';"
-export DATABASE_URL="postgres://mal_ledger_user:choose_a_real_password@localhost:5432/mal_ledger?sslmode=disable"
+sudo -u postgres psql -p 5432 -d postgres -c "ALTER ROLE mal_ledger_user WITH LOGIN PASSWORD 'choose_a_real_password';"
+export DATABASE_URL="postgres://mal_ledger_user:choose_a_real_password@127.0.0.1:5432/mal_ledger?sslmode=disable"
 psql "$DATABASE_URL" -f schema.sql
+```
+
+On some PostgreSQL 12 installations, password authentication may fail if the server expects a different password format. Force SCRAM storage and test with `PGPASSWORD`:
+
+```bash
+sudo -u postgres psql -p 5432 -d postgres -c "SET password_encryption = 'scram-sha-256'; ALTER ROLE mal_ledger_user WITH LOGIN PASSWORD 'choose_a_real_password';"
+PGPASSWORD='choose_a_real_password' psql -h 127.0.0.1 -p 5432 -U mal_ledger_user -d mal_ledger -c "SELECT current_user, current_database();"
 ```
 
 ## Run With Docker
