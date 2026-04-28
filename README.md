@@ -18,6 +18,84 @@ The Go application will be added in later milestones. For now, the runnable arti
 - `psql`
 - Optional: Docker, if you do not already have PostgreSQL running locally
 
+## Install PostgreSQL On Ubuntu
+
+Use this path when you want PostgreSQL installed directly on Ubuntu instead of running it through Docker.
+
+Update package metadata:
+
+```bash
+sudo apt update
+```
+
+Install PostgreSQL and common extra utilities:
+
+```bash
+sudo apt install -y postgresql postgresql-contrib
+```
+
+Start PostgreSQL and enable it on boot:
+
+```bash
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+```
+
+Check that the service is running:
+
+```bash
+sudo systemctl status postgresql
+```
+
+Confirm the installed client version:
+
+```bash
+psql --version
+```
+
+Create a local database user for this project. The command below prompts for a password:
+
+```bash
+sudo -u postgres createuser --interactive --pwprompt mal_ledger_user
+```
+
+When prompted:
+
+- Answer `no` to superuser, database creation, and role creation for a normal local setup.
+- The database will be created by the built-in `postgres` admin user and owned by this project user.
+
+Create the database owned by that user:
+
+```bash
+sudo -u postgres createdb --owner=mal_ledger_user mal_ledger
+```
+
+Set the local connection string:
+
+```bash
+export DATABASE_URL="postgres://mal_ledger_user:YOUR_PASSWORD@localhost:5432/mal_ledger?sslmode=disable"
+```
+
+Apply the schema:
+
+```bash
+psql "$DATABASE_URL" -f schema.sql
+```
+
+If `CREATE EXTENSION pgcrypto` fails because your local PostgreSQL policy restricts extensions, apply the schema once as the `postgres` admin user or ask a database admin to enable `pgcrypto` in the `mal_ledger` database.
+
+Verify the tables:
+
+```bash
+psql "$DATABASE_URL" -c "\dt"
+```
+
+If local password authentication fails, check `/etc/postgresql/*/main/pg_hba.conf` and make sure local TCP connections use password authentication such as `scram-sha-256` or `md5`, then restart PostgreSQL:
+
+```bash
+sudo systemctl restart postgresql
+```
+
 ## Run With Docker
 
 Start PostgreSQL:
